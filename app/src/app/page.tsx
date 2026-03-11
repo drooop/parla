@@ -43,22 +43,37 @@ interface Message {
   role: "user" | "assistant"
   content: string
   lowConfidenceWords?: string[]
+  versions?: string[]
+  activeVersion?: number
 }
 
 const LOW_CONFIDENCE_THRESHOLD = 0.6
+
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/\*(.*?)\*/g, "$1")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/_(.*?)_/g, "$1")
+    .replace(/~~(.*?)~~/g, "$1")
+    .replace(/`(.*?)`/g, "$1")
+}
 
 export default function Home() {
   const [conversations, setConversations] = useState<CachedConversation[]>([])
   const [activeConvId, setActiveConvId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [isProcessing, setIsProcessing] = useState(false)
+  const [isPlaying, setIsPlaying] = useState(false)
   const [showNewChat, setShowNewChat] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [editingTitle, setEditingTitle] = useState(false)
+  const [textInput, setTextInput] = useState("")
 
   const { isRecording, startRecording, stopRecording } = useAudioRecorder()
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null)
 
   const activeConv = conversations.find((c) => c.id === activeConvId) ?? null
 
@@ -92,7 +107,23 @@ export default function Home() {
     const source = ctx.createBufferSource()
     source.buffer = audioBuffer
     source.connect(ctx.destination)
+    audioSourceRef.current = source
+    setIsPlaying(true)
+    source.onended = () => {
+      setIsPlaying(false)
+      audioSourceRef.current = null
+    }
     source.start()
+  }, [])
+
+  const stopAudio = useCallback(() => {
+    try {
+      audioSourceRef.current?.stop()
+    } catch {
+      // already stopped
+    }
+    audioSourceRef.current = null
+    setIsPlaying(false)
   }, [])
 
   const getSystemPrompt = useCallback((tag: string) => {
@@ -104,6 +135,7 @@ export default function Home() {
   // Select a conversation: load messages from cache or DB
   const handleSelectConversation = useCallback(
     async (id: string) => {
+      stopAudio()
       setActiveConvId(id)
 
       const conv = conversations.find((c) => c.id === id)
@@ -111,14 +143,12 @@ export default function Home() {
       const cachedVersion = getCachedMessageVersion(id)
 
       if (cached && conv && cachedVersion >= conv.version) {
-        // Cache is up to date
         setMessages(cached)
         setTimeout(scrollToBottom, 50)
         return
       }
 
       if (cached && cached.length > 0) {
-        // Cache exists but may be stale - show what we have, then fetch delta
         setMessages(cached)
         try {
           const { messages: newMsgs, version } = await fetchMessages(id, cached.length)
@@ -133,7 +163,6 @@ export default function Home() {
           // DB unavailable, use cache
         }
       } else {
-        // No cache - full fetch
         try {
           const { messages: allMsgs, version } = await fetchMessages(id)
           setMessages(allMsgs)
@@ -145,7 +174,7 @@ export default function Home() {
 
       setTimeout(scrollToBottom, 50)
     },
-    [conversations, scrollToBottom]
+    [conversations, scrollToBottom, stopAudio]
   )
 
   // Create new conversation
@@ -162,7 +191,6 @@ export default function Home() {
         setActiveConvId(conv.id)
         setMessages([])
       } catch {
-        // DB unavailable - create local-only conversation
         const localConv: CachedConversation = {
           id: crypto.randomUUID(),
           title: null,
@@ -227,6 +255,89 @@ export default function Home() {
     [activeConvId, conversations]
   )
 
+  // Core message processing: LLM -> TTS -> persist
+  const processUserMessage = useCallback(
+    async (text: string, lowConfidenceWords?: string[]) => {
+      if (!activeConvId || !activeConv) return
+
+      setIsProcessing(true)
+
+      try {
+        const userMessage: Message = {
+          role: "user",
+          content: text,
+          lowConfidenceWords,
+        }
+
+        const isFirstMessage = messages.length === 0
+
+        const updatedMessages = [...messages, userMessage]
+        setMessages(updatedMessages)
+        setTimeout(scrollToBottom, 50)
+
+        const chatMessages: ChatMsg[] = [
+          { role: "system", content: getSystemPrompt(activeConv.tag) },
+          ...updatedMessages.map((m) => ({ role: m.role, content: m.content })),
+        ]
+
+        const reply = await chat(chatMessages)
+
+        const assistantMessage: Message = {
+          role: "assistant",
+          content: reply,
+        }
+
+        const finalMessages = [...updatedMessages, assistantMessage]
+        setMessages(finalMessages)
+        setTimeout(scrollToBottom, 50)
+
+        // Persist to DB (async, non-blocking for TTS)
+        const persistPromise = appendMessages(activeConvId, [userMessage, assistantMessage])
+          .then(({ version, msgCount }) => {
+            const updatedConv = { ...activeConv, version, msgCount, updatedAt: new Date().toISOString() }
+            upsertCachedConversation(updatedConv)
+            setConversations((prev) =>
+              prev.map((c) => (c.id === activeConvId ? updatedConv : c))
+            )
+            appendCachedMessages(activeConvId, [userMessage, assistantMessage], version)
+          })
+          .catch(() => {
+            appendCachedMessages(activeConvId, [userMessage, assistantMessage], activeConv.version)
+          })
+
+        // Generate title after first message
+        if (isFirstMessage) {
+          generateTitle(activeConvId, text)
+            .then((title) => {
+              upsertCachedConversation({ ...activeConv, title })
+              setConversations((prev) =>
+                prev.map((c) => (c.id === activeConvId ? { ...c, title } : c))
+              )
+            })
+            .catch(() => {})
+        }
+
+        // TTS (only the reply part, not corrections)
+        const replyText = reply.includes("---")
+          ? reply.split("---")[0].trim()
+          : reply
+        const audioData = await synthesize(stripMarkdown(replyText))
+        await playAudio(audioData)
+
+        await persistPromise
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : "Unknown error"
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: `Error: ${errMsg}` },
+        ])
+      } finally {
+        setIsProcessing(false)
+      }
+    },
+    [activeConvId, activeConv, messages, getSystemPrompt, scrollToBottom, playAudio]
+  )
+
   // Record handlers
   const handleRecordStart = useCallback(async () => {
     try {
@@ -243,7 +354,6 @@ export default function Home() {
     setIsProcessing(true)
 
     try {
-      // 1. Speech to text
       const sttResult = await transcribe(audioBlob)
       if (!sttResult.text.trim()) {
         setIsProcessing(false)
@@ -254,86 +364,137 @@ export default function Home() {
         .filter((w) => w.probability < LOW_CONFIDENCE_THRESHOLD)
         .map((w) => w.word)
 
-      const userMessage: Message = {
-        role: "user",
-        content: sttResult.text,
-        lowConfidenceWords,
-      }
-
-      const isFirstMessage = messages.length === 0
-
-      const updatedMessages = [...messages, userMessage]
-      setMessages(updatedMessages)
-      setTimeout(scrollToBottom, 50)
-
-      // 2. Chat with LLM
-      const chatMessages: ChatMsg[] = [
-        { role: "system", content: getSystemPrompt(activeConv.tag) },
-        ...updatedMessages.map((m) => ({ role: m.role, content: m.content })),
-      ]
-
-      const reply = await chat(chatMessages)
-
-      const assistantMessage: Message = {
-        role: "assistant",
-        content: reply,
-      }
-
-      const finalMessages = [...updatedMessages, assistantMessage]
-      setMessages(finalMessages)
-      setTimeout(scrollToBottom, 50)
-
-      // 3. Persist to DB (async, non-blocking for TTS)
-      const persistPromise = appendMessages(activeConvId, [userMessage, assistantMessage])
-        .then(({ version, msgCount }) => {
-          const updatedConv = { ...activeConv, version, msgCount, updatedAt: new Date().toISOString() }
-          upsertCachedConversation(updatedConv)
-          setConversations((prev) =>
-            prev.map((c) => (c.id === activeConvId ? updatedConv : c))
-          )
-          appendCachedMessages(activeConvId, [userMessage, assistantMessage], version)
-        })
-        .catch(() => {
-          // DB unavailable - cache-only
-          appendCachedMessages(activeConvId, [userMessage, assistantMessage], activeConv.version)
-        })
-
-      // 4. Generate title after first message (async, fire-and-forget)
-      if (isFirstMessage) {
-        generateTitle(activeConvId, sttResult.text)
-          .then((title) => {
-            upsertCachedConversation({ ...activeConv, title })
-            setConversations((prev) =>
-              prev.map((c) => (c.id === activeConvId ? { ...c, title } : c))
-            )
-          })
-          .catch(() => {})
-      }
-
-      // 5. TTS (only the reply part, not corrections)
-      const replyText = reply.includes("---")
-        ? reply.split("---")[0].trim()
-        : reply
-      const audioData = await synthesize(replyText)
-      await playAudio(audioData)
-
-      await persistPromise
+      setIsProcessing(false)
+      await processUserMessage(sttResult.text, lowConfidenceWords)
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : "Unknown error"
       setMessages((prev) => [
         ...prev,
         { role: "assistant", content: `Error: ${errMsg}` },
       ])
-    } finally {
       setIsProcessing(false)
     }
-  }, [stopRecording, activeConvId, activeConv, messages, getSystemPrompt, scrollToBottom, playAudio])
+  }, [stopRecording, activeConvId, activeConv, processUserMessage])
 
-  // Hold spacebar to record
+  // Text input submit
+  const handleTextSubmit = useCallback(async () => {
+    const text = textInput.trim()
+    if (!text) return
+    setTextInput("")
+    await processUserMessage(text)
+  }, [textInput, processUserMessage])
+
+  // Edit user message and regenerate
+  const handleEditMessage = useCallback(
+    async (index: number, newContent: string) => {
+      if (!activeConvId || !activeConv || isProcessing) return
+
+      // Update user message content
+      const updatedMessages = messages.map((m, i) =>
+        i === index ? { ...m, content: newContent, lowConfidenceWords: undefined } : m
+      )
+
+      // Check if there's an assistant response after this user message
+      const assistantIndex = index + 1
+      const hasAssistantResponse =
+        assistantIndex < messages.length && messages[assistantIndex].role === "assistant"
+
+      setIsProcessing(true)
+
+      try {
+        // Build chat context up to and including the edited message
+        const contextMessages = updatedMessages.slice(0, index + 1)
+        const chatMessages: ChatMsg[] = [
+          { role: "system", content: getSystemPrompt(activeConv.tag) },
+          ...contextMessages.map((m) => ({ role: m.role, content: m.content })),
+        ]
+
+        const reply = await chat(chatMessages)
+
+        if (hasAssistantResponse) {
+          const oldMsg = messages[assistantIndex]
+          const existingVersions = oldMsg.versions ?? [oldMsg.content]
+          const newVersions = [...existingVersions, reply]
+          const newActiveVersion = newVersions.length - 1
+
+          const finalMessages = updatedMessages.map((m, i) =>
+            i === assistantIndex
+              ? { ...m, content: reply, versions: newVersions, activeVersion: newActiveVersion }
+              : m
+          )
+          setMessages(finalMessages)
+        } else {
+          setMessages([
+            ...updatedMessages,
+            { role: "assistant", content: reply },
+          ])
+        }
+
+        setTimeout(scrollToBottom, 50)
+
+        // TTS
+        const replyText = reply.includes("---")
+          ? reply.split("---")[0].trim()
+          : reply
+        const audioData = await synthesize(stripMarkdown(replyText))
+        await playAudio(audioData)
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : "Unknown error"
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: `Error: ${errMsg}` },
+        ])
+      } finally {
+        setIsProcessing(false)
+      }
+    },
+    [activeConvId, activeConv, messages, isProcessing, getSystemPrompt, scrollToBottom, playAudio]
+  )
+
+  // Version navigation for assistant messages
+  const handleVersionChange = useCallback(
+    (index: number, direction: "prev" | "next") => {
+      setMessages((prev) =>
+        prev.map((m, i) => {
+          if (i !== index || !m.versions) return m
+          const current = m.activeVersion ?? 0
+          const next = direction === "prev" ? current - 1 : current + 1
+          if (next < 0 || next >= m.versions.length) return m
+          return { ...m, content: m.versions[next], activeVersion: next }
+        })
+      )
+    },
+    []
+  )
+
+  // Replay assistant message audio
+  const handleReplay = useCallback(
+    async (content: string) => {
+      const replyText = content.includes("---")
+        ? content.split("---")[0].trim()
+        : content
+      try {
+        stopAudio()
+        const audioData = await synthesize(stripMarkdown(replyText))
+        await playAudio(audioData)
+      } catch {
+        // TTS unavailable
+      }
+    },
+    [stopAudio, playAudio]
+  )
+
+  // Keyboard shortcuts: spacebar to record, Escape to stop audio
   useEffect(() => {
     const spaceHeldRef = { current: false }
 
     const onKeyDown = (e: KeyboardEvent) => {
+      // Escape to stop audio (works everywhere)
+      if (e.key === "Escape") {
+        stopAudio()
+        return
+      }
+
       if (e.code !== "Space" || e.repeat) return
       const tag = (e.target as HTMLElement).tagName
       if (tag === "INPUT" || tag === "TEXTAREA") return
@@ -361,7 +522,7 @@ export default function Home() {
       window.removeEventListener("keydown", onKeyDown)
       window.removeEventListener("keyup", onKeyUp)
     }
-  }, [handleRecordStart, handleRecordStop])
+  }, [handleRecordStart, handleRecordStop, stopAudio])
 
   const tagLabel = activeConv
     ? activeConv.tag === "free-talk"
@@ -448,23 +609,62 @@ export default function Home() {
             </div>
           ) : messages.length === 0 ? (
             <div className="flex items-center justify-center h-full text-gray-500">
-              <p>Hold the button or press Space to speak</p>
+              <p>Hold Space to speak, or type below</p>
             </div>
           ) : (
-            messages.map((msg, i) => (
-              <ChatMessage
-                key={i}
-                role={msg.role}
-                content={msg.content}
-                lowConfidenceWords={msg.lowConfidenceWords}
-              />
-            ))
+            messages.map((msg, i) => {
+              const displayContent = msg.versions && msg.activeVersion !== undefined
+                ? msg.versions[msg.activeVersion]
+                : msg.content
+
+              return (
+                <ChatMessage
+                  key={i}
+                  role={msg.role}
+                  content={displayContent}
+                  lowConfidenceWords={msg.lowConfidenceWords}
+                  onEdit={msg.role === "user" ? (newContent) => handleEditMessage(i, newContent) : undefined}
+                  onReplay={msg.role === "assistant" ? () => handleReplay(displayContent) : undefined}
+                  versionCount={msg.versions?.length}
+                  activeVersion={msg.activeVersion}
+                  onVersionChange={msg.versions && msg.versions.length > 1
+                    ? (dir) => handleVersionChange(i, dir)
+                    : undefined
+                  }
+                />
+              )
+            })
           )}
           <div ref={messagesEndRef} />
         </div>
 
         {activeConvId && (
-          <div className="flex justify-center py-6 border-t border-gray-800">
+          <div className="flex items-center gap-3 px-4 py-4 border-t border-gray-800">
+            <input
+              type="text"
+              value={textInput}
+              onChange={(e) => setTextInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault()
+                  handleTextSubmit()
+                }
+              }}
+              placeholder="Type a message..."
+              disabled={isProcessing}
+              className="flex-1 bg-gray-800 text-white rounded-xl px-4 py-3 text-sm outline-none placeholder-gray-500 disabled:opacity-50"
+            />
+            {isPlaying && (
+              <button
+                onClick={stopAudio}
+                className="w-10 h-10 rounded-full bg-red-600 hover:bg-red-500 flex items-center justify-center flex-shrink-0 transition-colors"
+                title="Stop audio (Esc)"
+              >
+                <svg className="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
+                  <rect x="6" y="6" width="12" height="12" rx="1" />
+                </svg>
+              </button>
+            )}
             <RecordButton
               isRecording={isRecording}
               isProcessing={isProcessing}
