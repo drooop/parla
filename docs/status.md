@@ -1,6 +1,6 @@
 # Project Status
 
-## Current Version: v0.2
+## Current Version: v0.3
 
 **Date**: 2026-03-11
 
@@ -31,22 +31,32 @@
 - [x] CC BY-NC 4.0 open source license
 - [x] Pushed to GitHub
 
+### v0.3 — Input & Playback
+- [x] Upgraded STT to multilingual small model (supports mixed Chinese-English input)
+- [x] Text input box for typed messages (bypasses STT, useful for Chinese words)
+- [x] User message editing with LLM regeneration and response version navigation
+- [x] Stop audio playback (Esc key or stop button)
+- [x] Replay button on assistant message bubbles
+- [x] Strip markdown formatting before TTS to avoid reading asterisks
+- [x] Auto-stop audio when switching conversations
+
 ## Fixes
 
 - [x] TTS: Fixed Piper API usage (synthesize returns AudioChunk iterator, requires manual WAV writing)
 - [x] LLM: Disabled Qwen3.5 thinking mode (response time from 20s down to 1-7s)
 - [x] LLM: Reduced num_ctx to 2048 (prompt processing 11 → 78 tok/s)
 - [x] STT: Fixed SOCKS proxy causing startup failure (start.sh clears ALL_PROXY)
+- [x] TTS: Strip markdown (bold, italic, code) before synthesis
 
 ## TODO
 
-### v0.3 — Experience
+### v0.4 — Experience
 - [ ] AI speech speed control
 - [ ] More scenario templates
 - [ ] Recording waveform visualization
 - [ ] Word-level confidence color coding
 
-### v0.4 — Pronunciation Assessment
+### v0.5 — Pronunciation Assessment
 - [ ] Common Chinese-accent detection (th/s, l/r, v/w)
 - [ ] Shadowing mode (given sentence, user reads aloud, compare)
 - [ ] Error vocabulary notebook

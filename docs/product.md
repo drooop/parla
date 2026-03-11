@@ -12,10 +12,10 @@ Provide Chinese-speaking learners with a fully local, zero-cost English speaking
 
 ## Core Interaction Flow
 
-1. User holds the record button or spacebar and speaks in English
-2. On release, speech is transcribed and displayed in the chat
+1. User holds the record button or spacebar and speaks in English, or types a message in the text input
+2. On release (voice) or Enter (text), speech is transcribed and displayed in the chat
 3. AI replies naturally in English while pointing out grammar/vocabulary errors
-4. AI reply is played back as audio
+4. AI reply is played back as audio (can be stopped via Esc or stop button, replayed via replay button)
 
 ## Practice Modes
 
@@ -48,6 +48,13 @@ Confidence-based approach:
 ```
 
 If the user's English is correct, the correction section shows "No corrections needed. Great job!"
+
+## Message Interaction
+
+- Edit user messages to trigger LLM regeneration
+- Navigate between response versions (left/right arrows) when multiple exist
+- Replay assistant audio via bubble replay button
+- Stop audio playback via Esc key or stop button
 
 ## Conversation Management
 

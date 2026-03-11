@@ -6,7 +6,7 @@
 ┌─────────────────────────────────────────────────┐
 │              Browser (localhost:3000)            │
 │  ┌──────────┐ ┌──────────┐ ┌─────────────────┐  │
-│  │ Sidebar   │ │ Chat Msgs│ │ Record / Space  │  │
+│  │ Sidebar   │ │ Chat Msgs│ │Record/Type/Stop │  │
 │  └──────────┘ └──────────┘ └────────┬────────┘  │
 │       │                  audio blob (webm/opus) │
 │  localStorage                       │           │
@@ -17,7 +17,7 @@
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
 │  PostgreSQL  │    │  STT :8001   │    │  TTS :8002   │
 │  (optional)  │    │ faster-whisper│    │ Piper        │
-│              │    │ base.en      │    │ alba-medium  │
+│              │    │ small (multi)│    │ alba-medium  │
 │  conversations│    │              │    │              │
 │  messages    │    │ Python/FastAPI│    │ Python/FastAPI│
 └──────────────┘    └──────┬───────┘    └──────────────┘
@@ -33,14 +33,21 @@
 ## Data Flow
 
 ```
+Voice path:
 1. User holds button/spacebar → MediaRecorder starts recording
 2. User releases → audio Blob obtained (webm/opus)
 3. POST /transcribe → faster-whisper → { text, words[{word, probability}] }
+
+Text path:
+1. User types message and presses Enter
+
+Shared pipeline (both paths):
 4. POST ollama/api/chat → Qwen3.5-9B → reply text (with corrections)
-5. POST /synthesize → Piper TTS → audio/wav
-6. AudioContext plays wav
-7. Messages persisted to PostgreSQL (async, non-blocking for TTS playback)
-8. After first message, fire-and-forget title generation via LLM
+5. Strip markdown from reply text
+6. POST /synthesize → Piper TTS → audio/wav
+7. AudioContext plays wav (stoppable via Esc or stop button, replayable via bubble button)
+8. Messages persisted to PostgreSQL (async, non-blocking for TTS playback)
+9. After first message, fire-and-forget title generation via LLM
 ```
 
 ## Component Responsibilities
@@ -49,14 +56,14 @@
 
 | File | Responsibility |
 |------|----------------|
-| `page.tsx` | Main page — orchestrates record → STT → LLM → TTS flow, conversation management |
+| `page.tsx` | Main page — orchestrates record/text → STT → LLM → TTS flow, audio control, message editing, conversation management |
 | `use-audio-recorder.ts` | Wraps MediaRecorder API |
 | `api.ts` | STT/LLM/TTS service calls |
 | `conversations-api.ts` | Conversation CRUD + message read/write API |
 | `cache.ts` | localStorage cache management with version checking |
 | `prompts.ts` | System prompts and scenario definitions |
 | `db.ts` | PostgreSQL connection pool (server-side) |
-| `chat-message.tsx` | Message bubble — separates reply and corrections |
+| `chat-message.tsx` | Message bubble — separates reply and corrections, supports editing, replay, and version navigation |
 | `record-button.tsx` | Record button (hold to speak) |
 | `conversation-list.tsx` | Sidebar conversation list |
 | `new-chat-dialog.tsx` | New conversation dialog (scenario selection) |
@@ -72,7 +79,8 @@
 
 ### STT Service (services/stt/)
 
-- faster-whisper base.en model, CPU int8 inference
+- faster-whisper small multilingual model, CPU int8 inference
+- Supports mixed Chinese-English input (auto language detection)
 - Accepts webm audio, returns transcribed text + word-level confidence
 - `word_timestamps=True` enables word-level timestamps and probabilities
 
