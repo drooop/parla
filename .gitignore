@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+.venv/
+
+# Build
+.next/
+app/tsconfig.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+
+# Piper models (large binary files)
+services/piper-models/*.onnx
+services/piper-models/*.json
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+
+# Prompt / AI related
+CLAUDE.md
+
+# Marketing materials
+xhs/
+
+# Playwright MCP
+.playwright-mcp/
