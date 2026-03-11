@@ -13,9 +13,9 @@ if ! ollama list | grep -q "qwen3.5"; then
   exit 1
 fi
 
-# Start STT service (unset SOCKS proxy to avoid socksio dependency during model download)
+# Start STT service (clear proxy env vars to avoid socksio/proxy issues)
 echo "Starting STT service on :8001..."
-(cd "$SCRIPT_DIR/services/stt" && source ../../.venv/bin/activate && ALL_PROXY="" all_proxy="" SOCKS_PROXY="" socks_proxy="" uvicorn server:app --host 0.0.0.0 --port 8001) &
+(cd "$SCRIPT_DIR/services/stt" && source ../../.venv/bin/activate && ALL_PROXY="" all_proxy="" SOCKS_PROXY="" socks_proxy="" HTTP_PROXY="" http_proxy="" HTTPS_PROXY="" https_proxy="" uvicorn server:app --host 0.0.0.0 --port 8001) &
 STT_PID=$!
 
 # Start TTS service

@@ -11,7 +11,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-model = WhisperModel("base.en", device="cpu", compute_type="int8")
+model = WhisperModel("small", device="cpu", compute_type="int8")
 
 
 @app.get("/health")
@@ -27,7 +27,7 @@ async def transcribe(file: UploadFile = File(...)):
         tmp.write(audio_bytes)
         tmp.flush()
         segments, info = model.transcribe(
-            tmp.name, language="en", word_timestamps=True
+            tmp.name, word_timestamps=True
         )
         words = []
         text_parts = []
